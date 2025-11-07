@@ -137,8 +137,8 @@ class TelegramBotController extends Controller
         // Resolve e salva/atualiza o usuário do DB
         $dbUser = $this->userController->saveOrUpdateTelegramUser($telegramUser);
         $localUserId = $dbUser->id;
-
-        $text = $message->getText() ? strtolower($message->getText()) : '';
+        $userState = $dbUser->state()->first();
+        $text = $message->getText() ? $message->getText() : '';
 
         // Se for um texto vindo de um botão inline (callback) mas que caiu aqui, ignora.
         if ($update->getCallbackQuery()) {
@@ -162,13 +162,12 @@ class TelegramBotController extends Controller
             return;
         }
 
-        // Lógica para Mensagens Encaminhadas ---
-        if ($message->getForwardFromChat()) {
-            $userState = $dbUser->state()->first();
-            if ($userState && $userState->state === 'awaiting_channel_message') {
-                $this->channelController->processForwardedChannel($update, $dbUser, $userState, $chatId);
-                return; // Já tratou a atualização, sai do método.
-            }
+        // Tratamento de Mensagem Encaminhada
+        if ($message->getForwardFromChat() && $userState && $userState->state === 'awaiting_channel_message') {
+            // Chama o novo método no ChannelController para processar e salvar
+            $this->channelController->processForwardedChannel($update, $dbUser, $userState, $chatId);
+            return;
         }
+
     }
 }

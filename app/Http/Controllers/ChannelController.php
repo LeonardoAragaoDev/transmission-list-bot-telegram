@@ -7,6 +7,7 @@ use App\Models\Channel;
 use App\Models\TransmissionListChannel;
 use App\Models\User;
 use App\Models\UserState;
+use App\Services\KeyboardService;
 use Telegram\Bot\Api;
 use Telegram\Bot\Objects\Chat as TelegramChatObject;
 use Illuminate\Support\Facades\Log;
@@ -149,6 +150,27 @@ class ChannelController extends Controller
         $type = $forwardedChat->getType();
 
         try {
+            // O bot deve ser administrador do canal de destino e ter permissão de postagem.
+            $permissions = $this->checkBotPermissions($chatIdTelegram);
+
+            if (!$permissions['is_admin']) {
+                $this->telegram->sendMessage([
+                    "chat_id" => $chatId,
+                    "text" => "⚠️ *Falha ao adicionar: Bot não é Admin!*\n\nO bot deve ser *Administrador* no canal/grupo \"{$chatName}\" para poder enviar mensagens.",
+                    "parse_mode" => "Markdown",
+                ]);
+                return;
+            }
+
+            if (!$permissions['can_post']) {
+                $this->telegram->sendMessage([
+                    "chat_id" => $chatId,
+                    "text" => "⚠️ *Falha ao adicionar: Permissão de Postagem!*\\n\\nO bot não tem a permissão para *Postar mensagens* (Post Messages) no canal \"{$chatName}\".",
+                    "parse_mode" => "Markdown",
+                ]);
+                return;
+            }
+
             // Verifica se o canal já foi adicionado
             $channelExists = TransmissionListChannel::where([
                 'transmission_list_id' => $currentListId,
@@ -177,8 +199,9 @@ class ChannelController extends Controller
             $listCount = TransmissionListChannel::where('transmission_list_id', $currentListId)->count();
             $this->telegram->sendMessage([
                 "chat_id" => $chatId,
-                "text" => "➕ Canal *\"{$chatName}\"* adicionado!\n\nTotal de canais na lista: *{$listCount}*.\nEncaminhe mais mensagens ou digite /done para finalizar.",
+                "text" => "➕ Canal *\"{$chatName}\"* adicionado!\n\nTotal de canais na lista: *{$listCount}*.\nEncaminhe mais mensagens para adicionar outros canais ou grupos ou digite /done para finalizar.",
                 "parse_mode" => "Markdown",
+                "reply_markup" => KeyboardService::done()
             ]);
 
         } catch (\Exception $e) {

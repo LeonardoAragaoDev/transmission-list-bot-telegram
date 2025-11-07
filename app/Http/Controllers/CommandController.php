@@ -15,14 +15,20 @@ class CommandController extends Controller
     // Telegram API
     protected Api $telegram;
 
+    // Controllers
+    protected ChannelController $channelController;
+
     // Variáveis globais
     protected string $storageChannelId;
     protected string $adminChannelInviteLink;
 
-    public function __construct(Api $telegram)
+    public function __construct(Api $telegram, ChannelController $channelController)
     {
         // Telegram API
         $this->telegram = $telegram;
+
+        // Controllers
+        $this->channelController = $channelController;
 
         // Variáveis globais
         $this->storageChannelId = env('TELEGRAM_STORAGE_CHANNEL_ID') ?? '';
@@ -55,11 +61,10 @@ class CommandController extends Controller
             case 'status':
                 $this->handleStatusCommand($chatId);
                 return true;
-            case 'configure': // Comando para iniciar a criação da lista
             case 'newlist':
                 $this->handleNewListCommand($dbUser, $chatId);
                 return true;
-            case 'cancel': // Comando para cancelar qualquer fluxo ativo
+            case 'cancel':
                 $this->handleCancelCommand($dbUser, $chatId);
                 return true;
             default:
@@ -145,15 +150,43 @@ class CommandController extends Controller
      */
     public function handleCancelCommand(User $dbUser, $chatId): void
     {
-        // Limpa o estado ativo, se houver
+        // 1. RECUPERA O ESTADO ATUAL ANTES DE ZERÁ-LO
+        $userState = $dbUser->state()->first();
+        $listIdToDelete = null;
+        $messageText = "❌ *Operação cancelada!* Seu fluxo de configuração foi limpo.";
+
+        // 2. Tenta extrair o ID da lista se o estado for um dos fluxos de criação e houver dados
+        if ($userState && $userState->data) {
+            // O campo 'data' é configurado com um cast no Eloquent e já é um array/objeto.
+            $stateData = $userState->data;
+
+            if (is_array($stateData) && isset($stateData['current_list_id'])) {
+                $listIdToDelete = $stateData['current_list_id'];
+            }
+        }
+
+        // 3. ZERA O ESTADO (Sempre reseta para 'idle')
         $dbUser->state()->updateOrCreate(
             ['user_id' => $dbUser->id],
             ['state' => 'idle', 'data' => null]
         );
 
+        // 4. Tenta apagar a lista (se o ID existir e o objeto puder ser encontrado)
+        if ($listIdToDelete) {
+            $list = TransmissionList::find($listIdToDelete);
+
+            if ($list) {
+                $listName = $list->name;
+                // Deleta a lista. O onDelete('cascade') apagará os canais associados.
+                $list->delete();
+                $messageText = "❌ *Operação cancelada!* A lista **\"{$listName}\"** e seus canais foram apagados.";
+            }
+        }
+
+        // 5. Envia a mensagem de cancelamento
         $this->telegram->sendMessage([
             "chat_id" => $chatId,
-            "text" => "❌ *Operação cancelada!* Seu fluxo de configuração foi limpo.",
+            "text" => $messageText,
             "parse_mode" => "Markdown",
             "reply_markup" => KeyboardService::newList(),
         ]);
@@ -202,8 +235,12 @@ class CommandController extends Controller
         switch ($userState->state) {
             case 'awaiting_list_name':
                 return $this->processListName($text, $dbUser, $userState, $chatId);
+            case 'awaiting_channel_message':
+                // A lógica para processar mensagens encaminhadas está em ChannelController
+                return false;
             // case 'awaiting_send_message': (será implementado depois)
             default:
+                $this->handleUnknownCommand($chatId);
                 return false;
         }
     }
@@ -240,8 +277,9 @@ class CommandController extends Controller
         // 3. Envia a instrução para o próximo passo
         $this->telegram->sendMessage([
             "chat_id" => $chatId,
-            "text" => "🎉 Lista *\"{$name}\"* criada com sucesso!\n\nAgora, por favor, *encaminhe uma mensagem* de cada canal ou grupo que você deseja adicionar a esta lista.\n\nQuando terminar, digite /done.",
+            "text" => "🎉 Lista *\"{$name}\"* criada com sucesso!\n\nAgora, por favor, *encaminhe uma mensagem* de cada canal (grupos ainda não são aceitos) que você deseja adicionar a esta lista.\n\nQuando terminar, digite /done.",
             "parse_mode" => "Markdown",
+            "reply_markup" => KeyboardService::cancel(),
         ]);
 
         return true;
@@ -249,8 +287,12 @@ class CommandController extends Controller
 
 
     /**
-     * Trata os comandos de fluxo (dependem do estado atual e podem não ser texto puro).
-     * Retorna true se um comando de fluxo foi tratado.
+     * Executa a lógica do comando /done (agora pode vir de um callback).
+     *
+     * @param string $text
+     * @param User $dbUser
+     * @param int|string $chatId
+     * @return bool
      */
     public function handleFlowCommand(string $text, User $dbUser, $chatId): bool
     {
@@ -268,10 +310,13 @@ class CommandController extends Controller
                     "chat_id" => $chatId,
                     "text" => "✅ Adição de canais finalizada! Sua lista está pronta para uso.",
                     "parse_mode" => "Markdown",
+                    "reply_markup" => KeyboardService::newList(),
                 ]);
+
                 return true;
             }
         }
+
         return false;
     }
 }

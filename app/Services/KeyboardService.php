@@ -32,6 +32,17 @@ class KeyboardService
         ]);
     }
 
+    public static function done(): string
+    {
+        return json_encode([
+            'inline_keyboard' => [
+                [
+                    ['text' => 'Concluir', 'callback_data' => '/done']
+                ],
+            ]
+        ]);
+    }
+
     public static function newList(): string
     {
         return json_encode([
@@ -56,5 +67,4 @@ class KeyboardService
             ]
         ]);
     }
-
 }
