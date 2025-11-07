@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Models\TransmissionList;
 use App\Models\User;
 use App\Models\UserState;
 use App\Services\KeyboardService;
@@ -38,6 +39,12 @@ class CommandController extends Controller
         $localUserId = $dbUser->id;
         $command = str_replace('/', '', explode(' ', $text)[0]);
 
+        // Primeiro, trata comandos de fluxo (que dependem do estado atual)
+        if ($this->handleFlowCommand($text, $dbUser, $chatId)) {
+            return true;
+        }
+
+        // Depois, trata comandos simples
         switch (strtolower($command)) {
             case 'start':
                 $this->handleStartCommand($localUserId, $chatId, $dbUser);
@@ -48,9 +55,17 @@ class CommandController extends Controller
             case 'status':
                 $this->handleStatusCommand($chatId);
                 return true;
+            case 'configure': // Comando para iniciar a criação da lista
+            case 'newlist':
+                $this->handleNewListCommand($dbUser, $chatId);
+                return true;
+            case 'cancel': // Comando para cancelar qualquer fluxo ativo
+                $this->handleCancelCommand($dbUser, $chatId);
+                return true;
             default:
-                $this->handleUnknownCommand($chatId);
-                return false;
+                // Se não for um comando, ele pode ser uma resposta de texto esperada (ex: nome da lista)
+                $this->handleExpectedResponse($text, $dbUser, $chatId);
+                return false; // Retorna false para indicar que o texto não era um comando simples
         }
     }
 
@@ -68,7 +83,7 @@ class CommandController extends Controller
 
         $this->telegram->sendMessage([
             "chat_id" => $chatId,
-            "text" => "🤖 *Olá, " . $dbUser->first_name . "! Eu sou o NextMessageBot.*\n\nEnvie o comando /configure para iniciar a automação no seu canal, para conferir todos os comandos digite /commands e caso esteja configurando e queira cancelar a qualquer momento basta digitar /cancel.\n\nPara usar o bot, você deve estar inscrito no nosso [Canal Oficial]({$this->adminChannelInviteLink}).",
+            "text" => "🤖 *Olá, " . $dbUser->first_name . "! Eu sou o TransmissionListBot.*\n\nEnvie o comando /newList para iniciar a criação de uma nova lista de transmissão, para conferir todos os comandos digite /commands e caso esteja configurando e queira cancelar a qualquer momento basta digitar /cancel.\n\nPara usar o bot, você deve estar inscrito no nosso [Canal Oficial]({$this->adminChannelInviteLink}).",
             "parse_mode" => "Markdown",
             "reply_markup" => KeyboardService::start(),
         ]);
@@ -86,6 +101,7 @@ class CommandController extends Controller
             "chat_id" => $chatId,
             "text" => "⚙️ *Comandos*\n\n /start - Iniciar o bot\n /configure - Configurar uma lista de transmissão de mensagem\n /status - Verificar status do bot\n /cancel - Cancelar qualquer fluxo de configuração ativo",
             "parse_mode" => "Markdown",
+            "reply_markup" => KeyboardService::newList(),
         ]);
     }
 
@@ -100,6 +116,7 @@ class CommandController extends Controller
             "chat_id" => $chatId,
             "text" => "✅ *O Bot tá on!*",
             "parse_mode" => "Markdown",
+            "reply_markup" => KeyboardService::newListListCommand(),
         ]);
     }
 
@@ -117,5 +134,144 @@ class CommandController extends Controller
             "text" => "Comando não reconhecido. Use /commands para ver a lista.",
             "parse_mode" => "Markdown",
         ]);
+    }
+
+    /**
+     * Executa a lógica do comando /cancel.
+     * Limpa o estado do usuário.
+     *
+     * @param User $dbUser
+     * @param int|string $chatId
+     */
+    public function handleCancelCommand(User $dbUser, $chatId): void
+    {
+        // Limpa o estado ativo, se houver
+        $dbUser->state()->updateOrCreate(
+            ['user_id' => $dbUser->id],
+            ['state' => 'idle', 'data' => null]
+        );
+
+        $this->telegram->sendMessage([
+            "chat_id" => $chatId,
+            "text" => "❌ *Operação cancelada!* Seu fluxo de configuração foi limpo.",
+            "parse_mode" => "Markdown",
+            "reply_markup" => KeyboardService::newList(),
+        ]);
+    }
+
+    /**
+     * Executa a lógica do comando /newlist (ou /configure).
+     * Inicia o fluxo de criação da lista.
+     *
+     * @param User $dbUser
+     * @param int|string $chatId
+     */
+    public function handleNewListCommand(User $dbUser, $chatId): void
+    {
+        // 1. Define o estado do usuário
+        $dbUser->state()->updateOrCreate(
+            ['user_id' => $dbUser->id],
+            ['state' => 'awaiting_list_name', 'data' => null]
+        );
+
+        // 2. Envia a instrução
+        $this->telegram->sendMessage([
+            "chat_id" => $chatId,
+            "text" => "📝 *Criando nova lista...*\n\nPor favor, *envie o nome* que você quer dar para esta lista de transmissão (Ex: Clientes VIP, Parceiros Beta).",
+            "parse_mode" => "Markdown",
+            "reply_markup" => KeyboardService::cancel(),
+        ]);
+    }
+
+    /**
+     * Trata a mensagem de texto do usuário fora do contexto de comando,
+     * baseando-se no estado atual.
+     *
+     * @param string $text
+     * @param User $dbUser
+     * @param int|string $chatId
+     */
+    public function handleExpectedResponse(string $text, User $dbUser, $chatId): bool
+    {
+        $userState = $dbUser->state()->first();
+
+        if (!$userState || $userState->state === 'idle') {
+            return false; // Não há estado ativo
+        }
+
+        switch ($userState->state) {
+            case 'awaiting_list_name':
+                return $this->processListName($text, $dbUser, $userState, $chatId);
+            // case 'awaiting_send_message': (será implementado depois)
+            default:
+                return false;
+        }
+    }
+
+    /**
+     * Processa o nome da lista fornecido pelo usuário.
+     */
+    protected function processListName(string $name, User $dbUser, UserState $userState, $chatId): bool
+    {
+        // Garante que o nome não está vazio
+        $name = trim($name);
+        if (empty($name)) {
+            $this->telegram->sendMessage([
+                "chat_id" => $chatId,
+                "text" => "O nome da lista não pode ser vazio. Por favor, tente novamente.",
+                "parse_mode" => "Markdown",
+                "reply_markup" => KeyboardService::cancel(),
+            ]);
+            return true;
+        }
+
+        // 1. Cria a lista no DB
+        $newList = TransmissionList::create([
+            'user_id' => $dbUser->id,
+            'name' => $name,
+        ]);
+
+        // 2. Atualiza o estado para aguardar os canais
+        $userState->state = 'awaiting_channel_message';
+        // Salva o ID da nova lista para uso nas próximas interações
+        $userState->data = ['current_list_id' => $newList->id];
+        $userState->save();
+
+        // 3. Envia a instrução para o próximo passo
+        $this->telegram->sendMessage([
+            "chat_id" => $chatId,
+            "text" => "🎉 Lista *\"{$name}\"* criada com sucesso!\n\nAgora, por favor, *encaminhe uma mensagem* de cada canal ou grupo que você deseja adicionar a esta lista.\n\nQuando terminar, digite /done.",
+            "parse_mode" => "Markdown",
+        ]);
+
+        return true;
+    }
+
+
+    /**
+     * Trata os comandos de fluxo (dependem do estado atual e podem não ser texto puro).
+     * Retorna true se um comando de fluxo foi tratado.
+     */
+    public function handleFlowCommand(string $text, User $dbUser, $chatId): bool
+    {
+        $command = str_replace('/', '', explode(' ', $text)[0]);
+
+        if (strtolower($command) === 'done') {
+            // Lógica para finalizar a adição de canais
+            $userState = $dbUser->state()->first();
+            if ($userState && $userState->state === 'awaiting_channel_message') {
+                $userState->state = 'idle';
+                $userState->data = null;
+                $userState->save();
+
+                $this->telegram->sendMessage([
+                    "chat_id" => $chatId,
+                    "text" => "✅ Adição de canais finalizada! Sua lista está pronta para uso.",
+                    "parse_mode" => "Markdown",
+                ]);
+                return true;
+            }
+        }
+        return false;
     }
 }

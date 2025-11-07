@@ -112,9 +112,14 @@ class TelegramBotController extends Controller
         ]);
 
         $isSubscribed = $this->channelController->isUserAdminChannelMember($this->adminChannelId, $telegramUserId, $localUserId, $chatId);
+
+        if (!$isSubscribed) {
+            return;
+        }
+
         $returnCommand = $this->commandController->delegateCommand($callbackData, $dbUser, $chatId);
 
-        if (!$isSubscribed || $returnCommand) {
+        if ($returnCommand) {
             return;
         }
     }
@@ -145,11 +150,25 @@ class TelegramBotController extends Controller
             return;
         }
 
-        $returnCommand = $this->commandController->delegateCommand($text, $dbUser, $chatId);
         $isSubscribed = $this->channelController->isUserAdminChannelMember($this->adminChannelId, $telegramUserId, $localUserId, $chatId);
 
-        if (!$isSubscribed || $returnCommand) {
+        if (!$isSubscribed) {
             return;
+        }
+
+        $returnCommand = $this->commandController->delegateCommand($text, $dbUser, $chatId);
+
+        if ($returnCommand) {
+            return;
+        }
+
+        // Lógica para Mensagens Encaminhadas ---
+        if ($message->getForwardFromChat()) {
+            $userState = $dbUser->state()->first();
+            if ($userState && $userState->state === 'awaiting_channel_message') {
+                $this->channelController->processForwardedChannel($update, $dbUser, $userState, $chatId);
+                return; // Já tratou a atualização, sai do método.
+            }
         }
     }
 }

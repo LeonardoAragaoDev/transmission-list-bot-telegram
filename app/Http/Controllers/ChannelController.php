@@ -4,6 +4,8 @@ namespace App\Http\Controllers;
 
 use App\Models\BotConfig;
 use App\Models\Channel;
+use App\Models\TransmissionListChannel;
+use App\Models\User;
 use App\Models\UserState;
 use Telegram\Bot\Api;
 use Telegram\Bot\Objects\Chat as TelegramChatObject;
@@ -117,5 +119,75 @@ class ChannelController extends Controller
         }
 
         return $retorno;
+    }
+
+    /**
+     * Processa uma mensagem encaminhada para extrair e salvar o chat/canal na lista.
+     * @param Update $update A atualização completa do Telegram.
+     * @param User $dbUser O modelo User do banco de dados.
+     * @param UserState $userState O estado atual do usuário.
+     * @param int|string $chatId O ID do chat privado.
+     */
+    public function processForwardedChannel(Update $update, User $dbUser, UserState $userState, $chatId): void
+    {
+        $message = $update->getMessage();
+        $forwardedChat = $message->getForwardFromChat();
+        $currentListId = $userState->data['current_list_id'] ?? null;
+
+        if (!$forwardedChat || !$currentListId) {
+            $this->telegram->sendMessage([
+                "chat_id" => $chatId,
+                "text" => "⚠️ *Erro de Fluxo:* Não foi possível identificar o canal ou a lista de destino. Por favor, tente novamente ou digite /cancel.",
+                "parse_mode" => "Markdown",
+            ]);
+            return;
+        }
+
+        $chatIdTelegram = $forwardedChat->getId();
+        $chatName = $forwardedChat->getTitle() ?? 'N/A';
+        $username = $forwardedChat->getUsername();
+        $type = $forwardedChat->getType();
+
+        try {
+            // Verifica se o canal já foi adicionado
+            $channelExists = TransmissionListChannel::where([
+                'transmission_list_id' => $currentListId,
+                'chat_id' => $chatIdTelegram,
+            ])->exists();
+
+            if ($channelExists) {
+                $this->telegram->sendMessage([
+                    "chat_id" => $chatId,
+                    "text" => "ℹ️ O canal *\"{$chatName}\"* já foi adicionado a esta lista.",
+                    "parse_mode" => "Markdown",
+                ]);
+                return;
+            }
+
+            // 1. Salva o canal na lista
+            TransmissionListChannel::create([
+                'transmission_list_id' => $currentListId,
+                'chat_id' => $chatIdTelegram,
+                'chat_name' => $chatName,
+                'username' => $username,
+                'type' => $type,
+            ]);
+
+            // 2. Envia confirmação
+            $listCount = TransmissionListChannel::where('transmission_list_id', $currentListId)->count();
+            $this->telegram->sendMessage([
+                "chat_id" => $chatId,
+                "text" => "➕ Canal *\"{$chatName}\"* adicionado!\n\nTotal de canais na lista: *{$listCount}*.\nEncaminhe mais mensagens ou digite /done para finalizar.",
+                "parse_mode" => "Markdown",
+            ]);
+
+        } catch (\Exception $e) {
+            Log::error("Falha ao salvar canal encaminhado: " . $e->getMessage(), ['chat_id' => $chatIdTelegram, 'list_id' => $currentListId]);
+            $this->telegram->sendMessage([
+                "chat_id" => $chatId,
+                "text" => "❌ *Erro ao adicionar canal:* Ocorreu um erro no servidor. Tente novamente.",
+                "parse_mode" => "Markdown",
+            ]);
+        }
     }
 }
