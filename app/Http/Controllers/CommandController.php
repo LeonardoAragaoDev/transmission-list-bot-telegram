@@ -64,6 +64,9 @@ class CommandController extends Controller
             case 'newlist':
                 $this->handleNewListCommand($dbUser, $chatId);
                 return true;
+            case 'send':
+                $this->handleSendCommand($dbUser, $chatId);
+                return true;
             case 'cancel':
                 $this->handleCancelCommand($dbUser, $chatId);
                 return true;
@@ -96,17 +99,37 @@ class CommandController extends Controller
 
     /**
      * Executa a lógica do comando /commands.
-     * Lista todos os comandos disponíveis para o usuário.
+     * Lista todos os comandos disponíveis para o usuário de forma organizada.
      *
      * @param int|string $chatId O ID do chat privado.
      */
     public function handleCommandsCommand($chatId): void
     {
+        // 1. Definição dos comandos em um array (fácil manutenção)
+        $commands = [
+            '/start' => 'Iniciar o bot',
+            '/newList' => 'Configurar uma lista de transmissão',
+            '/send' => 'Enviar mensagem para uma lista selecionada',
+            '/status' => 'Verificar status do bot',
+            '/cancel' => 'Cancelar qualquer fluxo ativo',
+        ];
+
+        // 2. Construção da string da mensagem
+        $commandList = '';
+        foreach ($commands as $command => $description) {
+            $commandList .= "`" . $command . "` - " . $description . "\n";
+        }
+
+        $messageText = "⚙️ *Comandos Disponíveis* ⚙️\n\n" .
+            "Use os comandos abaixo para interagir com o bot:\n\n" .
+            $commandList;
+
+        // 3. Envio da mensagem
         $this->telegram->sendMessage([
             "chat_id" => $chatId,
-            "text" => "⚙️ *Comandos*\n\n /start - Iniciar o bot\n /configure - Configurar uma lista de transmissão de mensagem\n /status - Verificar status do bot\n /cancel - Cancelar qualquer fluxo de configuração ativo",
+            "text" => $messageText,
             "parse_mode" => "Markdown",
-            "reply_markup" => KeyboardService::newList(),
+            "reply_markup" => KeyboardService::newListListCommand()
         ]);
     }
 
@@ -318,5 +341,53 @@ class CommandController extends Controller
         }
 
         return false;
+    }
+
+    /**
+     * Executa a lógica do comando /send.
+     * Inicia o fluxo de envio de mensagens, listando as listas de transmissão.
+     *
+     * @param User $dbUser O usuário local no DB.
+     * @param int|string $chatId O ID do chat privado.
+     */
+    public function handleSendCommand(User $dbUser, $chatId): void
+    {
+        // 1. Busca todas as listas de transmissão do usuário
+        $lists = TransmissionList::where('user_id', $dbUser->id)->get();
+
+        if ($lists->isEmpty()) {
+            // Se o usuário não tiver listas, informa e sugere criar uma.
+            $this->telegram->sendMessage([
+                "chat_id" => $chatId,
+                "text" => "⚠️ Você ainda não possui nenhuma Lista de Transmissão. Utilize o comando /newList para criar sua primeira lista!",
+                "parse_mode" => "Markdown",
+            ]);
+            return;
+        }
+
+        // 2. Constrói o teclado inline com as listas
+        $keyboard = [];
+        foreach ($lists as $list) {
+            // Usa o ID da lista no callback_data para identificação.
+            // O prefixo 'select_list:' será usado no próximo passo para identificar a ação.
+            $keyboard[] = [
+                ['text' => "{$list->name}", 'callback_data' => "select_list:{$list->id}"]
+            ];
+        }
+
+        // Adiciona um botão de cancelamento
+        $keyboard[] = [['text' => '❌ Cancelar Envio', 'callback_data' => '/cancel']];
+
+        $replyMarkup = [
+            'inline_keyboard' => $keyboard,
+        ];
+
+        // 3. Envia a mensagem com as listas disponíveis
+        $this->telegram->sendMessage([
+            "chat_id" => $chatId,
+            "text" => "✉️ *Selecione a Lista de Transmissão* para a qual você deseja enviar a próxima mensagem:",
+            "parse_mode" => "Markdown",
+            "reply_markup" => json_encode($replyMarkup)
+        ]);
     }
 }

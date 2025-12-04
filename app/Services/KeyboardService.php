@@ -67,4 +67,21 @@ class KeyboardService
             ]
         ]);
     }
+
+    /**
+     * Teclado de confirmação para o envio de mensagens.
+     * @param int $messageId O ID da TransmissionListMessage.
+     */
+    public static function confirmSend(int $messageId): string
+    {
+        // Os callbacks de confirmação serão 'confirm_send:ID' e 'cancel_send:ID'
+        return json_encode([
+            'inline_keyboard' => [
+                [
+                    ['text' => '✅ Confirmar Envio', 'callback_data' => "confirm_send:{$messageId}"],
+                    ['text' => '❌ Cancelar Envio', 'callback_data' => "cancel_send:{$messageId}"],
+                ],
+            ]
+        ]);
+    }
 }

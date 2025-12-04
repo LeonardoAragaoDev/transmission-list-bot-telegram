@@ -4,10 +4,13 @@ namespace App\Http\Controllers;
 
 use App\Models\BotConfig;
 use App\Models\Channel;
+use App\Models\TransmissionList;
 use App\Models\TransmissionListChannel;
+use App\Models\TransmissionListMessage;
 use App\Models\User;
 use App\Models\UserState;
 use App\Services\KeyboardService;
+use Exception;
 use Telegram\Bot\Api;
 use Telegram\Bot\Objects\Chat as TelegramChatObject;
 use Illuminate\Support\Facades\Log;
@@ -15,12 +18,20 @@ use Telegram\Bot\Objects\Update;
 
 class ChannelController extends Controller
 {
+    // Telegram API
     protected Api $telegram;
+
+    // Variáveis globais
+    protected string $storageChannelId;
     protected string $adminChannelInviteLink;
 
     public function __construct(Api $telegram)
     {
+        // Telegram API
         $this->telegram = $telegram;
+
+        // Variáveis globais
+        $this->storageChannelId = env('TELEGRAM_STORAGE_CHANNEL_ID') ?? '';
         $this->adminChannelInviteLink = env('TELEGRAM_ADMIN_CHANNEL_INVITE_PRIVATE_LINK') ?? '';
     }
 
@@ -209,6 +220,81 @@ class ChannelController extends Controller
             $this->telegram->sendMessage([
                 "chat_id" => $chatId,
                 "text" => "❌ *Erro ao adicionar canal:* Ocorreu um erro no servidor. Tente novamente.",
+                "parse_mode" => "Markdown",
+            ]);
+        }
+    }
+
+    /**
+     * Processa a mensagem enviada pelo usuário para ser transmitida.
+     * Salva a mensagem no canal de storage e inicia a fase de confirmação.
+     *
+     * @param \Telegram\Bot\Objects\Message $message O objeto da mensagem original do Telegram.
+     * @param \App\Models\User $dbUser O usuário local no DB.
+     * @param \App\Models\UserState $userState O estado atual do usuário.
+     * @param int|string $chatId O ID do chat privado do usuário.
+     */
+    public function processMessageForTransmission($message, $dbUser, $userState, $chatId): void
+    {
+        // O ID do canal de storage (drive) é definido no CommandController.php.
+        // Você precisa ter acesso a ele. Se não estiver no ChannelController, injete-o no construtor.
+        // Pelo que vi, você não tem o storageChannelId no ChannelController.
+        // Vamos injetar ou passar a dependência. Por enquanto, assumiremos que ele está disponível.
+        if (!$this->storageChannelId) {
+            $this->telegram->sendMessage([
+                "chat_id" => $chatId,
+                "text" => "❌ *Erro de Configuração:* O ID do Canal Drive (STORAGE) não está definido no sistema.",
+                "parse_mode" => "Markdown",
+            ]);
+            return;
+        }
+
+        try {
+            // 1. Encaminha/Salva a mensagem para o Canal Drive
+            $driveMessage = $this->telegram->forwardMessage([
+                'chat_id' => $this->storageChannelId, // ID do Canal Drive
+                'from_chat_id' => $chatId,      // ID do usuário
+                'message_id' => $message->getMessageId(), // ID da mensagem a ser salva
+            ]);
+
+            $driveMessageId = $driveMessage->getMessageId();
+            $listId = $userState->data['transmission_list_id'] ?? null;
+
+            if (!$listId) {
+                throw new Exception("ID da lista de transmissão ausente no estado do usuário.");
+            }
+
+            // 2. Registra a mensagem salva no DB
+            $transmissionListMessage = TransmissionListMessage::create([
+                'user_id' => $dbUser->id,
+                'drive_chat_id' => $this->storageChannelId,
+                'drive_message_id' => $driveMessageId,
+                'transmission_list_id' => $listId,
+                'status' => 'pending', // Marca como pendente de envio
+            ]);
+
+            // 3. Atualiza o estado do usuário para aguardar a confirmação
+            $userState->state = 'awaiting_send_confirmation';
+            // Guarda o ID da mensagem de transmissão para a próxima fase
+            $userState->data = ['transmission_message_id' => $transmissionListMessage->id];
+            $userState->save();
+
+            // 4. Envia o prompt de confirmação
+            $list = TransmissionList::find($listId); // Busca a lista para nome
+            $listName = $list ? $list->name : 'Lista Desconhecida';
+
+            $this->telegram->sendMessage([
+                "chat_id" => $chatId,
+                "text" => "🎉 *Mensagem Recebida e Salva!*\\n\\nA mensagem acima (que é uma cópia da sua) foi armazenada e está pronta para ser enviada para a lista **\"{$listName}\"**.\\n\\n*Deseja prosseguir com o envio agora?*",
+                "parse_mode" => "Markdown",
+                "reply_markup" => KeyboardService::confirmSend($transmissionListMessage->id), // NOVO TECLADO
+            ]);
+
+        } catch (Exception $e) {
+            Log::error("Falha ao salvar mensagem para transmissão: " . $e->getMessage(), ['user_id' => $dbUser->id]);
+            $this->telegram->sendMessage([
+                "chat_id" => $chatId,
+                "text" => "❌ *Erro ao salvar mensagem:* Ocorreu um erro no servidor. Verifique se o bot é administrador do Canal Drive e tente novamente.",
                 "parse_mode" => "Markdown",
             ]);
         }

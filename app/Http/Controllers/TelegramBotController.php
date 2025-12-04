@@ -2,6 +2,8 @@
 
 namespace App\Http\Controllers;
 
+use App\Models\TransmissionList;
+use App\Services\KeyboardService;
 use App\Utils\Utils;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
@@ -121,6 +123,16 @@ class TelegramBotController extends Controller
 
         if ($returnCommand) {
             return;
+        } else {
+            $this->telegram->answerCallbackQuery(['callback_query_id' => $callbackQuery->getId()]);
+        }
+
+        // Lógica de fluxo avançado
+        $flowHandled = $this->handleCallbackFlow($callbackQuery, $dbUser, $chatId);
+
+        // Sempre responde ao CallbackQuery (se o fluxo não o fez)
+        if ($callbackQuery->getId()) {
+            $this->telegram->answerCallbackQuery(['callback_query_id' => $callbackQuery->getId()]);
         }
     }
 
@@ -162,12 +174,89 @@ class TelegramBotController extends Controller
             return;
         }
 
-        // Tratamento de Mensagem Encaminhada
-        if ($message->getForwardFromChat() && $userState && $userState->state === 'awaiting_channel_message') {
-            // Chama o novo método no ChannelController para processar e salvar
-            $this->channelController->processForwardedChannel($update, $dbUser, $userState, $chatId);
-            return;
+        // --- Lógica de Fluxos (Awaiting Message) ---
+        $userState = $dbUser->state()->first();
+        if ($userState) {
+            // Tratamento de Mensagem Encaminhada para adição de canal
+            if ($message->getForwardFromChat() && $userState->state === 'awaiting_channel_message') {
+                // Chama o método no ChannelController para processar e salvar canal
+                $this->channelController->processForwardedChannel($update, $dbUser, $userState, $chatId);
+                return;
+            }
+
+            // NOVO: Tratamento da Mensagem para Envio
+            if ($userState->state === 'awaiting_message_for_send') {
+                // Chama o novo método no ChannelController para processar e salvar a mensagem
+                $this->channelController->processMessageForTransmission($message, $dbUser, $userState, $chatId);
+                return;
+            }
         }
 
+        // Se a mensagem for texto e não for comando nem for tratada por estado
+        if (!empty($text) && !str_starts_with($text, '/') && $userState && $userState->state !== 'idle') {
+            // Lógica para tratar texto como resposta de estado (ex: nome da lista)
+            $handled = $this->commandController->handleExpectedResponse($text, $dbUser, $chatId);
+            if ($handled) {
+                return;
+            }
+        }
+
+        // Se a mensagem não for tratada por nenhum dos fluxos
+        if ($text) {
+            $this->commandController->handleUnknownCommand($chatId);
+            return;
+        }
     }
+
+    // Em TelegramBotController.php, adicione este novo método à classe
+
+    /**
+     * Gerencia ações de fluxo específicas acionadas por botões inline.
+     * @return bool Retorna true se um fluxo foi tratado.
+     */
+    protected function handleCallbackFlow($callbackQuery, $dbUser, $chatId): bool
+    {
+        $callbackData = $callbackQuery->getData();
+
+        // 1. Tratamento da seleção de lista (Formato: select_list:ID)
+        if (str_starts_with($callbackData, 'select_list:')) {
+            $listId = (int) explode(':', $callbackData)[1];
+
+            // 1.1 Busca a lista no DB e garante que pertence ao usuário
+            $list = TransmissionList::where('user_id', $dbUser->id)
+                ->where('id', $listId)
+                ->first();
+
+            if (!$list) {
+                $this->telegram->sendMessage([
+                    "chat_id" => $chatId,
+                    "text" => "❌ *Erro:* A lista selecionada não foi encontrada ou não pertence a você.",
+                    "parse_mode" => "Markdown",
+                ]);
+                return true;
+            }
+
+            // 1.2 Atualiza o estado do usuário para aguardar a mensagem
+            $userState = $dbUser->state()->firstOrNew(['user_id' => $dbUser->id]);
+            $userState->state = 'awaiting_message_for_send';
+
+            // Salva o ID da lista selecionada no campo 'data'
+            $userState->data = ['transmission_list_id' => $list->id];
+            $userState->save();
+
+            // 1.3 Envia a instrução de próximo passo
+            $this->telegram->sendMessage([
+                "chat_id" => $chatId,
+                "text" => "✅ Lista *\"{$list->name}\"* selecionada!\n\nAgora, por favor, *envie ou encaminhe a mensagem* (texto, foto, vídeo, etc.) que você deseja enviar para todos os canais desta lista.",
+                "parse_mode" => "Markdown",
+                "reply_markup" => KeyboardService::cancel(), // Permite cancelar o fluxo
+            ]);
+
+            return true;
+        }
+
+        // Nenhuma ação de fluxo tratada
+        return false;
+    }
+
 }
