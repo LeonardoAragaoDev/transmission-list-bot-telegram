@@ -2,8 +2,6 @@
 
 namespace App\Http\Controllers;
 
-use App\Models\BotConfig;
-use App\Models\Channel;
 use App\Models\TransmissionList;
 use App\Models\TransmissionListChannel;
 use App\Models\TransmissionListMessage;
@@ -12,7 +10,6 @@ use App\Models\UserState;
 use App\Services\KeyboardService;
 use Exception;
 use Telegram\Bot\Api;
-use Telegram\Bot\Objects\Chat as TelegramChatObject;
 use Illuminate\Support\Facades\Log;
 use Telegram\Bot\Objects\Update;
 
@@ -176,7 +173,7 @@ class ChannelController extends Controller
             if (!$permissions['can_post']) {
                 $this->telegram->sendMessage([
                     "chat_id" => $chatId,
-                    "text" => "⚠️ *Falha ao adicionar: Permissão de Postagem!*\\n\\nO bot não tem a permissão para *Postar mensagens* (Post Messages) no canal \"{$chatName}\".",
+                    "text" => "⚠️ *Falha ao adicionar: Permissão de Postagem!*\n\nO bot não tem a permissão para *Postar mensagens* (Post Messages) no canal \"{$chatName}\".",
                     "parse_mode" => "Markdown",
                 ]);
                 return;
@@ -215,7 +212,7 @@ class ChannelController extends Controller
                 "reply_markup" => KeyboardService::done()
             ]);
 
-        } catch (\Exception $e) {
+        } catch (Exception $e) {
             Log::error("Falha ao salvar canal encaminhado: " . $e->getMessage(), ['chat_id' => $chatIdTelegram, 'list_id' => $currentListId]);
             $this->telegram->sendMessage([
                 "chat_id" => $chatId,
@@ -285,7 +282,7 @@ class ChannelController extends Controller
 
             $this->telegram->sendMessage([
                 "chat_id" => $chatId,
-                "text" => "🎉 *Mensagem Recebida e Salva!*\\n\\nA mensagem acima (que é uma cópia da sua) foi armazenada e está pronta para ser enviada para a lista **\"{$listName}\"**.\\n\\n*Deseja prosseguir com o envio agora?*",
+                "text" => "🎉 *Mensagem Recebida e Salva!*\n\nA mensagem acima (que é uma cópia da sua) foi armazenada e está pronta para ser enviada para a lista **\"{$listName}\"**.\n\n*Deseja prosseguir com o envio agora?*",
                 "parse_mode" => "Markdown",
                 "reply_markup" => KeyboardService::confirmSend($transmissionListMessage->id), // NOVO TECLADO
             ]);
@@ -298,5 +295,288 @@ class ChannelController extends Controller
                 "parse_mode" => "Markdown",
             ]);
         }
+    }
+
+    /**
+     * Exibe/Edita a mensagem para mostrar os canais de uma lista específica.
+     */
+    public function handleListView(int $listId, $dbUser, $chatId, $messageId): void
+    {
+        $list = TransmissionList::where('user_id', $dbUser->id)
+            ->where('id', $listId)
+            ->with('channels') // Carrega os canais associados
+            ->first();
+
+        if (!$list) {
+            $this->telegram->answerCallbackQuery([
+                'callback_query_id' => request('callback_query')['id'],
+                'text' => '❌ Lista não encontrada.',
+                'show_alert' => true,
+            ]);
+            // Edita a mensagem original para evitar o "carregamento" infinito
+            $this->telegram->editMessageText([
+                "chat_id" => $chatId,
+                "message_id" => $messageId,
+                "text" => "❌ A lista não foi encontrada.",
+                "parse_mode" => "Markdown",
+            ]);
+            return;
+        }
+
+        $channels = $list->channels;
+        $messageText = $this->buildChannelListText($list, $channels);
+
+        // Edita a mensagem original com o novo conteúdo e teclado
+        $this->telegram->editMessageText([
+            "chat_id" => $chatId,
+            "message_id" => $messageId,
+            "text" => $messageText,
+            "parse_mode" => "Markdown",
+            "reply_markup" => KeyboardService::manageListChannels($listId, $channels),
+        ]);
+
+        $this->telegram->answerCallbackQuery([
+            'callback_query_id' => request('callback_query')['id'],
+            'text' => 'Detalhes da lista carregados.',
+        ]);
+    }
+
+    /**
+     * Constrói o texto de exibição da lista de canais.
+     */
+    private function buildChannelListText($list, $channels): string
+    {
+        $messageText = "📝 *Gerenciando Lista:* **{$list->name}**\n";
+        $messageText .= "Total de canais: *{$channels->count()}*\n\n";
+
+        if ($channels->isEmpty()) {
+            $messageText .= "⚠️ Não há canais associados a esta lista. Use o botão **'Adicionar Canais'** para começar.";
+        } else {
+            $messageText .= "Canais cadastrados:\n";
+            foreach ($channels as $index => $channel) {
+                $name = $channel->chat_name ?? "Canal ID: {$channel->chat_id}";
+                $messageText .= "• " . ($index + 1) . ". {$name}\n";
+            }
+        }
+
+        return $messageText;
+    }
+
+    /**
+     * Lida com a exclusão de um canal da lista.
+     */
+    public function handleDeleteChannel(int $channelId, $dbUser, $chatId, $messageId): void
+    {
+        $channel = TransmissionListChannel::find($channelId);
+
+        if (!$channel) {
+            $this->telegram->answerCallbackQuery([
+                'callback_query_id' => request('callback_query')['id'],
+                'text' => '❌ Canal não encontrado.',
+                'show_alert' => true,
+            ]);
+            return;
+        }
+
+        $listId = $channel->transmission_list_id;
+        $chatName = $channel->chat_name ?? $channel->chat_id;
+
+        // 1. Exclui o canal
+        $channel->delete();
+
+        // 2. Notifica o usuário
+        $this->telegram->answerCallbackQuery([
+            'callback_query_id' => request('callback_query')['id'],
+            'text' => "🗑️ Canal '{$chatName}' removido da lista.",
+        ]);
+
+        // 3. Atualiza a visualização da lista
+        $this->handleListView($listId, $dbUser, $chatId, $messageId);
+    }
+
+    /**
+     * Lida com as ações principais da lista (adicionar, enviar, renomear, excluir lista).
+     */
+    public function handleListAction(string $action, int $listId, $dbUser, $chatId, $messageId): void
+    {
+        $list = TransmissionList::where('user_id', $dbUser->id)
+            ->where('id', $listId)
+            ->first();
+
+        if (!$list) {
+            // ... (Lógica de erro, notificar e retornar)
+            return;
+        }
+
+        $userState = $dbUser->state()->firstOrNew(['user_id' => $dbUser->id]);
+
+        switch ($action) {
+            case 'add':
+                // Inicia o fluxo de adição de canais
+                $userState->state = 'awaiting_channel_message';
+                $userState->data = ['current_list_id' => $listId];
+                $userState->save();
+
+                $this->telegram->editMessageText([
+                    "chat_id" => $chatId,
+                    "message_id" => $messageId,
+                    "text" => "➕ *Adicionando Canais* à lista **'{$list->name}'**:\n\nPor favor, *encaminhe uma mensagem* de cada canal ou grupo que você deseja adicionar.\n\nQuando terminar, digite /done.",
+                    "parse_mode" => "Markdown",
+                    "reply_markup" => KeyboardService::cancel(),
+                ]);
+                break;
+
+            case 'send':
+                // Redireciona para o fluxo de envio (como se o usuário tivesse digitado /send e selecionado a lista)
+                $userState->state = 'awaiting_message_for_send';
+                $userState->data = ['transmission_list_id' => $listId];
+                $userState->save();
+
+                $this->telegram->editMessageText([
+                    "chat_id" => $chatId,
+                    "message_id" => $messageId,
+                    "text" => "✅ Lista *\"{$list->name}\"* selecionada!\n\nAgora, por favor, *envie ou encaminhe a mensagem* que você deseja enviar para todos os canais desta lista.",
+                    "parse_mode" => "Markdown",
+                    "reply_markup" => KeyboardService::cancel(),
+                ]);
+                break;
+
+            case 'delete':
+                // Solicita confirmação para exclusão da LISTA
+                $this->telegram->answerCallbackQuery([
+                    'callback_query_id' => request('callback_query')['id'],
+                    'text' => "⚠️ Por segurança, a exclusão da lista '{$list->name}' deve ser confirmada. Digite /deleteList {$listId} para confirmar.",
+                    'show_alert' => true,
+                ]);
+                break;
+
+            case 'rename':
+                // Inicia o fluxo de renomeação
+                $userState->state = 'awaiting_list_name_rename'; // Novo estado
+                $userState->data = ['list_to_rename_id' => $listId];
+                $userState->save();
+
+                $this->telegram->editMessageText([
+                    "chat_id" => $chatId,
+                    "message_id" => $messageId,
+                    "text" => "✏️ *Renomear Lista:* Por favor, digite o *novo nome* para a lista **'{$list->name}'**.",
+                    "parse_mode" => "Markdown",
+                    "reply_markup" => KeyboardService::cancel(),
+                ]);
+                break;
+        }
+    }
+
+    /**
+     * Processa o envio da mensagem para todos os canais da lista.
+     * Atualiza o status da mensagem no DB para 'sent' (ou 'sending'/'failed').
+     *
+     * @param TransmissionListMessage $transmissionMessage
+     * @param User $dbUser
+     * @param int|string $chatId
+     * @return void
+     */
+    public function handleMessageSend(TransmissionListMessage $transmissionMessage, User $dbUser, $chatId): void
+    {
+        // 1. Marca o status da mensagem como 'sending' (Enviando)
+        $transmissionMessage->status = 'sending';
+        $transmissionMessage->save();
+
+        try {
+            // 2. Busca os canais associados à lista
+            $listId = $transmissionMessage->transmission_list_id;
+            $channels = TransmissionListChannel::where('transmission_list_id', $listId)->get();
+
+            if ($channels->isEmpty()) {
+                $transmissionMessage->status = 'failed';
+                $transmissionMessage->save();
+
+                $this->telegram->sendMessage([
+                    "chat_id" => $chatId,
+                    "text" => "⚠️ *Alerta:* A lista selecionada não possui canais cadastrados. O envio falhou.",
+                    "parse_mode" => "Markdown",
+                ]);
+                return;
+            }
+
+            $sentCount = 0;
+            $failedCount = 0;
+
+            // 3. Itera e encaminha a mensagem para cada canal
+            foreach ($channels as $channel) {
+                try {
+                    $this->telegram->forwardMessage([
+                        'chat_id' => $channel->chat_id, // ID do canal de destino
+                        'from_chat_id' => $transmissionMessage->drive_chat_id, // ID do canal Drive (Origem)
+                        'message_id' => $transmissionMessage->drive_message_id, // ID da mensagem salva no Drive
+                    ]);
+                    $sentCount++;
+
+                } catch (Exception $e) {
+                    // Loga o erro de envio para um canal específico, mas continua para os outros
+                    Log::error("Falha ao enviar mensagem para o canal {$channel->chat_id}: " . $e->getMessage(), ['list_id' => $listId]);
+                    $failedCount++;
+                }
+            }
+
+            // 4. Conclui o envio e informa o usuário
+            $finalStatus = ($failedCount === 0) ? 'sent' : 'partial_success';
+            $transmissionMessage->status = $finalStatus;
+            $transmissionMessage->save();
+
+            $listName = $transmissionMessage->list ? $transmissionMessage->list->name : 'Lista Desconhecida';
+
+            $finalText = "✅ *Envio Concluído!*";
+            if ($sentCount > 0) {
+                $finalText .= "\n- Enviado para *{$sentCount}* canal(is) da lista **\"{$listName}\"**.";
+            }
+            if ($failedCount > 0) {
+                $finalText .= "\n- ❌ *Falha* ao enviar para *{$failedCount}* canal(is). Verifique se o bot ainda é administrador.";
+            }
+
+            $this->telegram->sendMessage([
+                "chat_id" => $chatId,
+                "text" => $finalText,
+                "parse_mode" => "Markdown",
+            ]);
+
+        } catch (Exception $e) {
+            // Loga e marca como falha se ocorrer um erro grave (antes do loop)
+            $transmissionMessage->status = 'failed';
+            $transmissionMessage->save();
+            Log::error("Erro fatal no fluxo de handleMessageSend: " . $e->getMessage(), ['user_id' => $dbUser->id]);
+        }
+    }
+
+    /**
+     * Cancela o envio e deleta a mensagem salva no Canal Drive.
+     * Atualiza o status da mensagem no DB para 'canceled' e, opcionalmente, a deleta.
+     *
+     * @param TransmissionListMessage $transmissionMessage
+     * @param User $dbUser
+     * @param int|string $chatId
+     * @return void
+     */
+    public function handleMessageCancel(TransmissionListMessage $transmissionMessage, User $dbUser, $chatId): void
+    {
+        try {
+            // 1. Tenta deletar a mensagem do canal Drive (Armazenamento)
+            $this->telegram->deleteMessage([
+                'chat_id' => $transmissionMessage->drive_chat_id,
+                'message_id' => $transmissionMessage->drive_message_id,
+            ]);
+            Log::info("Mensagem de transmissão ID {$transmissionMessage->id} deletada do Drive.");
+
+        } catch (Exception $e) {
+            // Loga o erro, mas o fluxo de cancelamento deve continuar.
+            Log::warning("Falha ao deletar mensagem ID {$transmissionMessage->id} do Drive: " . $e->getMessage());
+        }
+
+        // 2. Atualiza o status no DB para 'canceled'
+        $transmissionMessage->status = 'canceled';
+        $transmissionMessage->save();
+
+        // 3. Remove o registro da mensagem do DB também:
+        $transmissionMessage->delete();
     }
 }

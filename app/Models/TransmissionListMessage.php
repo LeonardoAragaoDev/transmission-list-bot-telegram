@@ -34,7 +34,7 @@ class TransmissionListMessage extends Model
     /**
      * Relacionamento: A mensagem pode estar associada a uma lista (para rastreio).
      */
-    public function transmissionList(): BelongsTo
+    public function list(): BelongsTo
     {
         return $this->belongsTo(TransmissionList::class);
     }

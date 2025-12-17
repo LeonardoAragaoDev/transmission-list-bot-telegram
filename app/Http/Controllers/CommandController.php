@@ -70,10 +70,12 @@ class CommandController extends Controller
             case 'cancel':
                 $this->handleCancelCommand($dbUser, $chatId);
                 return true;
+            case 'lists':
+                $this->handleListCommand($dbUser, $chatId);
+                return true;
             default:
                 // Se não for um comando, ele pode ser uma resposta de texto esperada (ex: nome da lista)
-                $this->handleExpectedResponse($text, $dbUser, $chatId);
-                return false; // Retorna false para indicar que o texto não era um comando simples
+                return $this->handleExpectedResponse($text, $dbUser, $chatId);
         }
     }
 
@@ -109,6 +111,7 @@ class CommandController extends Controller
         $commands = [
             '/start' => 'Iniciar o bot',
             '/newList' => 'Configurar uma lista de transmissão',
+            '/lists' => 'Listar todas as listas de transmissão',
             '/send' => 'Enviar mensagem para uma lista selecionada',
             '/status' => 'Verificar status do bot',
             '/cancel' => 'Cancelar qualquer fluxo ativo',
@@ -117,7 +120,7 @@ class CommandController extends Controller
         // 2. Construção da string da mensagem
         $commandList = '';
         foreach ($commands as $command => $description) {
-            $commandList .= "`" . $command . "` - " . $description . "\n";
+            $commandList .= $command . " - " . $description . "\n";
         }
 
         $messageText = "⚙️ *Comandos Disponíveis* ⚙️\n\n" .
@@ -216,7 +219,7 @@ class CommandController extends Controller
     }
 
     /**
-     * Executa a lógica do comando /newlist (ou /configure).
+     * Executa a lógica do comando /newlist
      * Inicia o fluxo de criação da lista.
      *
      * @param User $dbUser
@@ -261,7 +264,10 @@ class CommandController extends Controller
             case 'awaiting_channel_message':
                 // A lógica para processar mensagens encaminhadas está em ChannelController
                 return false;
-            // case 'awaiting_send_message': (será implementado depois)
+            case 'awaiting_list_name_rename':
+                return $this->processListRename($text, $dbUser, $userState, $chatId);
+            // case 'awaiting_send_message':
+            //     return true;
             default:
                 $this->handleUnknownCommand($chatId);
                 return false;
@@ -308,6 +314,39 @@ class CommandController extends Controller
         return true;
     }
 
+    protected function processListRename(string $text, User $dbUser, UserState $userState, $chatId): bool
+    {
+        $listId = $userState->data['list_to_rename_id'] ?? null;
+
+        if (!$listId) {
+            $this->telegram->sendMessage([
+                'chat_id' => $chatId,
+                'text' => "❌ Erro ao identificar a lista. Tente novamente.",
+            ]);
+            $userState->update(['state' => 'idle', 'data' => null]);
+            return true;
+        }
+
+        // 1. Busca a lista e atualiza o nome
+        $list = TransmissionList::where('user_id', $dbUser->id)->find($listId);
+
+        if ($list) {
+            $oldName = $list->name;
+            $list->name = $text; // O texto que o usuário digitou no log ("Lista T1")
+            $list->save();
+
+            $this->telegram->sendMessage([
+                'chat_id' => $chatId,
+                'text' => "✅ Lista renomeada com sucesso!\nDe: *{$oldName}*\nPara: *{$text}*",
+                'parse_mode' => 'Markdown'
+            ]);
+        }
+
+        // 2. Volta o estado para idle
+        $userState->update(['state' => 'idle', 'data' => null]);
+
+        return true;
+    }
 
     /**
      * Executa a lógica do comando /done (agora pode vir de um callback).
@@ -333,7 +372,7 @@ class CommandController extends Controller
                     "chat_id" => $chatId,
                     "text" => "✅ Adição de canais finalizada! Sua lista está pronta para uso.",
                     "parse_mode" => "Markdown",
-                    "reply_markup" => KeyboardService::newList(),
+                    "reply_markup" => KeyboardService::newListLists(),
                 ]);
 
                 return true;
@@ -388,6 +427,39 @@ class CommandController extends Controller
             "text" => "✉️ *Selecione a Lista de Transmissão* para a qual você deseja enviar a próxima mensagem:",
             "parse_mode" => "Markdown",
             "reply_markup" => json_encode($replyMarkup)
+        ]);
+    }
+
+    /**
+     * Executa a lógica do comando /lists.
+     * Lista todas as listas de transmissão do usuário.
+     *
+     * @param \App\Models\User $dbUser O usuário local no DB.
+     * @param int|string $chatId O ID do chat privado.
+     */
+    public function handleListCommand($dbUser, $chatId): void
+    {
+        $lists = TransmissionList::where('user_id', $dbUser->id)
+            ->orderBy('name', 'asc') // Ordena por nome
+            ->get();
+
+        if ($lists->isEmpty()) {
+            $this->telegram->sendMessage([
+                "chat_id" => $chatId,
+                "text" => "⚠️ Você ainda não possui nenhuma Lista de Transmissão. Use /newList para começar!",
+                "parse_mode" => "Markdown",
+                "reply_markup" => KeyboardService::newList(),
+            ]);
+            return;
+        }
+
+        $messageText = "📋 *Suas Listas de Transmissão ({$lists->count()}):*\n\nSelecione uma lista abaixo para ver ou gerenciar os canais:";
+
+        $this->telegram->sendMessage([
+            "chat_id" => $chatId,
+            "text" => $messageText,
+            "parse_mode" => "Markdown",
+            "reply_markup" => KeyboardService::listLists($lists),
         ]);
     }
 }

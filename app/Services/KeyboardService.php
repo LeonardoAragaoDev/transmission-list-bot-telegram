@@ -54,6 +54,20 @@ class KeyboardService
         ]);
     }
 
+    public static function newListLists(): string
+    {
+        return json_encode([
+            'inline_keyboard' => [
+                [
+                    ['text' => 'Nova Lista', 'callback_data' => '/newList'],
+                ],
+                [
+                    ['text' => 'Listas', 'callback_data' => '/lists'],
+                ],
+            ]
+        ]);
+    }
+
     public static function newListListCommand(): string
     {
         return json_encode([
@@ -83,5 +97,64 @@ class KeyboardService
                 ],
             ]
         ]);
+    }
+
+    /**
+     * Teclado com todas as listas de transmissão do usuário.
+     * Formato do callback_data: list_view:{list_id}
+     */
+    public static function listLists($lists): string
+    {
+        $keyboard = [];
+        foreach ($lists as $list) {
+            // Callback para vizualizar/gerenciar a lista: list_view:{id}
+            $keyboard[] = [
+                ['text' => "{$list->name} ({$list->channels->count()})", 'callback_data' => "list_view:{$list->id}"]
+            ];
+        }
+
+        $keyboard[] = [
+            ['text' => '➕ Nova Lista', 'callback_data' => '/newList'],
+            ['text' => '❌ Fechar', 'callback_data' => 'close_keyboard'],
+        ];
+
+        return json_encode(['inline_keyboard' => $keyboard]);
+    }
+
+    /**
+     * Teclado de gerenciamento de canais de uma lista específica.
+     * @param int $listId ID da lista
+     * @param Collection $channels Canais associados
+     */
+    public static function manageListChannels(int $listId, $channels): string
+    {
+        $keyboard = [];
+
+        // 1. Linha de Ações Principais
+        $keyboard[] = [
+            ['text' => '➕ Adicionar Canais', 'callback_data' => "list_action:add:{$listId}"],
+            ['text' => '✉️ Enviar Mensagem', 'callback_data' => "list_action:send:{$listId}"],
+        ];
+
+        // 2. Canais (com botão de exclusão)
+        foreach ($channels as $channel) {
+            $chatName = $channel->chat_name ?? $channel->chat_id;
+            $keyboard[] = [
+                ['text' => $chatName, 'callback_data' => "channel_view:{$channel->id}"], // Exibir info (opcional)
+                ['text' => '🗑️', 'callback_data' => "channel_action:delete:{$channel->id}"], // Excluir
+            ];
+        }
+
+        // 3. Linha de Ações Finais
+        $keyboard[] = [
+            ['text' => '✏️ Renomear Lista', 'callback_data' => "list_action:rename:{$listId}"],
+            ['text' => '➖ Excluir Lista', 'callback_data' => "list_action:delete:{$listId}"],
+        ];
+
+        $keyboard[] = [
+            ['text' => '⬅️ Voltar para Listas', 'callback_data' => '/lists'],
+        ];
+
+        return json_encode(['inline_keyboard' => $keyboard]);
     }
 }
