@@ -248,7 +248,7 @@ class ChannelController extends Controller
 
         try {
             // 1. Encaminha/Salva a mensagem para o Canal Drive
-            $driveMessage = $this->telegram->forwardMessage([
+            $driveMessage = $this->telegram->copyMessage([
                 'chat_id' => $this->storageChannelId, // ID do Canal Drive
                 'from_chat_id' => $chatId,      // ID do usuário
                 'message_id' => $message->getMessageId(), // ID da mensagem a ser salva
@@ -505,7 +505,7 @@ class ChannelController extends Controller
             // 3. Itera e encaminha a mensagem para cada canal
             foreach ($channels as $channel) {
                 try {
-                    $this->telegram->forwardMessage([
+                    $this->telegram->copyMessage([
                         'chat_id' => $channel->chat_id, // ID do canal de destino
                         'from_chat_id' => $transmissionMessage->drive_chat_id, // ID do canal Drive (Origem)
                         'message_id' => $transmissionMessage->drive_message_id, // ID da mensagem salva no Drive
@@ -528,10 +528,12 @@ class ChannelController extends Controller
 
             $finalText = "✅ *Envio Concluído!*";
             if ($sentCount > 0) {
-                $finalText .= "\n- Enviado para *{$sentCount}* canal(is) da lista **\"{$listName}\"**.";
+                $channelText = $sentCount > 1 ? 'canais' : 'canal';
+                $finalText .= "\n- Enviado para *{$sentCount}* {$channelText} da lista **\"{$listName}\"**.";
             }
             if ($failedCount > 0) {
-                $finalText .= "\n- ❌ *Falha* ao enviar para *{$failedCount}* canal(is). Verifique se o bot ainda é administrador.";
+                $channelText = $failedCount > 1 ? 'canais' : 'canal';
+                $finalText .= "\n- ❌ *Falha* ao enviar para *{$failedCount}* {$channelText}. Verifique se o bot ainda é administrador.";
             }
 
             $this->telegram->sendMessage([

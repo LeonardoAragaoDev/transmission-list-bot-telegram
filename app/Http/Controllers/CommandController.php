@@ -262,12 +262,9 @@ class CommandController extends Controller
             case 'awaiting_list_name':
                 return $this->processListName($text, $dbUser, $userState, $chatId);
             case 'awaiting_channel_message':
-                // A lógica para processar mensagens encaminhadas está em ChannelController
                 return false;
             case 'awaiting_list_name_rename':
                 return $this->processListRename($text, $dbUser, $userState, $chatId);
-            // case 'awaiting_send_message':
-            //     return true;
             default:
                 $this->handleUnknownCommand($chatId);
                 return false;
